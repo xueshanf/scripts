@@ -19,9 +19,6 @@
 # hooks.allowcommitsonmaster
 #   This boolean sets whether non-merge commits are allowed on master. By
 #   default, these are not allowed.
-# hooks.allowhotfixonmaster
-#   The boolean sets whether branches beginning with hotfix-* are allowed on
-#   master. NOT YET IMPLEMENTED. CURRENTLY IGNORED.
 # hooks.allowunannotated
 #   This boolean sets whether unannotated tags will be allowed into the
 #   repository.  By default they won't be.
@@ -48,7 +45,6 @@
 allowunsignedcommits=$(git config --bool hooks.allowunsignedcommits)
 allowunsignedtags=$(git config --bool hooks.allowunsignedtags)
 allowcommitsonmaster=$(git config --bool hooks.allowcommitsonmaster)
-allowhotfixonmaster=$(git config --bool hooks.allowhotfixonmaster)
 allowdeletebranch=$(git config --bool hooks.allowdeletebranch)
 denycreatebranch=$(git config --bool hooks.denycreatebranch)
 allowunannotated=$(git config --bool hooks.allowunannotated)
