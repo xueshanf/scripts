@@ -1,4 +1,21 @@
 #!/usr/bin/env bash
+shopt -s extglob
+
+## Code is based from https://github.com/isislovecruft/scripts/blob/master/check-commit-signature, and
+## https://github.com/saab-simc-admin/scripts/blob/master/check-commit-signature
+## Used on Gitlab to create custom_hooks per repo.
+##
+## Changes: 
+## 1. gpg (GnuPG) 1.4.16: signature returns "RSA key" with 10 charaters, instead of "Key ID" with 8 characters
+## 2. setup GNUPGHOME in project's custom_hook/.gnugp directory on Gitlab server. 
+## 3. store collaboraters' fingerprints in ./custom_hooks/fingerprints and will be sourced.
+# Setup gpg home: see README-setup.md for Gitlab backend initial setup.
+# This code runs as git user on Gitlab server.
+
+# collaborators's fingerprints array file 
+source ${PWD}/custom_hooks/fingerprints
+export GNUPGHOME=${PWD}/custom_hooks/.gnugp
+
 ##############################################################################
 #
 # check-commit-signature
@@ -11,14 +28,17 @@
 # Config
 # ------
 # hooks.allowunsignedcommits
-#   This boolean sets whether unsigned commits are allowed. By
-#   default, they are not allowed.
+#   This boolean sets whether unsigned tags, and merges with unsigned commits
+#   into master, are allowed. By default, they are not allowed.
 # hooks.allowunsignedtags
 #   This boolean sets whether unsigned tags are allowed. By default,
 #   they are not allowed.
 # hooks.allowcommitsonmaster
 #   This boolean sets whether non-merge commits are allowed on master. By
 #   default, these are not allowed.
+# hooks.allowhotfixonmaster
+#   The boolean sets whether branches beginning with hotfix-* are allowed on
+#   master. NOT YET IMPLEMENTED. CURRENTLY IGNORED.
 # hooks.allowunannotated
 #   This boolean sets whether unannotated tags will be allowed into the
 #   repository.  By default they won't be.
@@ -44,32 +64,20 @@
 ##################
 allowunsignedcommits=$(git config --bool hooks.allowunsignedcommits)
 allowunsignedtags=$(git config --bool hooks.allowunsignedtags)
-allowcommitsonmaster=$(git config --bool hooks.allowcommitsonmaster)
+#allowcommitsonmaster=$(git config --bool hooks.allowcommitsonmaster)
+allowcommitsonmaster="true"
+allowhotfixonmaster=$(git config --bool hooks.allowhotfixonmaster)
 allowdeletebranch=$(git config --bool hooks.allowdeletebranch)
 denycreatebranch=$(git config --bool hooks.denycreatebranch)
 allowunannotated=$(git config --bool hooks.allowunannotated)
 allowdeletetag=$(git config --bool hooks.allowdeletetag)
 allowmodifytag=$(git config --bool hooks.allowmodifytag)
 
-## committers and their signing GPG key fingerprints should go in the
-## ${collaborators} array:
-##
-## we hard code the fingerprint to protect against the possibility of the gpg
-## on the remote git server updating the keys (if it is configured to do so,
-## and also configured to use short keyids) and pulling in a colliding key from
-## a keyserver.
-##
-declare -A collaborators
-collaborators['aagbsn']='91D4 3A5B 1016 CEB6 D352  65AE 2C4B 239D D876 C9F6'
-collaborators['hellais']='46E5 EF37 DE26 4EA6 8DCF  53EA E3A2 1297 150F E210'
-collaborators['ioerror']='228F AD20 3DE9 AE7D 84E2  5265 CF9A 6F91 4193 A197'
-collaborators['isis']='0A6A 58A1 4B59 46AB DE18  E207 A3AD B67A 2CDB 8B35'
-
-## get the keyids from the fingerprints above:
+## get the keyids from the fingerprints ./fingerprints file:
 declare -A trusted_keys
 for collab in "${!collaborators[@]}"; do
     fpr="${collaborators["$collab"]}"
-    shortid=$(echo "$fpr" | cut -d ' ' --output-delimiter='' -f 10,11 )
+    shortid=$(echo "$fpr" | cut -d ' ' --output-delimiter='' -f 8,9,10,11 )
     trusted_keys["$collab"]="$shortid"
 
     ## git log --show-signature currently will only give us the shortid
@@ -80,6 +88,11 @@ for collab in "${!collaborators[@]}"; do
     #    grep ^pub | cut -d ':' -f 5 )
     #trusted_keys["$collab"]="$longid"
 done
+
+abort_ops() {
+   echo $1 >&2
+   exit 1 
+}
 
 is_allowed_signer() {
     signing_keyid=$1
@@ -157,8 +170,7 @@ if [ "$allowcommitsonmaster" != "true" ]; then
         done
 
         if [ "$old_is_parent_of_new" != "true" ]; then
-            echo "*** Master only accepts merges of feature branches" >&2
-            exit 1
+            abort_ops "*** Master only accepts merges of feature branches"
         fi
     fi
 fi
@@ -175,41 +187,32 @@ if [ -z "$span" ]; then
         commit)
             ## lightweight tag
             if [ "$allowunsignedtags" != "true" -o "$allowunannotated" != "true" ]; then
-                echo "*** The un-annotated tag $short_ref is not allowed in this repository" >&2
-                echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
-                exit 1
+                abort_ops "*** The un-annotated tag $short_ref is not allowed in this repository. Use 'git tag [ -a | -s ]' for tags you want to propagate."
             fi
             ;;
         tag)
             ## annotated tag
             if [ "$rev_old" != $zero -a "$allowmodifytag" != "true" ]; then
-                echo "*** Tag $short_ref already exists." >&2
-                echo "*** Modifying a tag is not allowed in this repository." >&2
-                exit 1
+                abort_ops "*** Tag $short_ref already exists. Modifying a tag is not allowed in this repository." 
             else
                 if [ "$allowunsignedtags" != "true" ]; then
                     result=$(git verify-tag $rev_new 2>&1 >/dev/null)
                     if ! grep '^gpg: Good signature' <<< "$result"; then
-                        echo "*** Tag $short_ref is not signed" >&2w
-                        exit 1
+                        abort_ops "*** Tag $short_ref is not signed."
                     fi
-
-                    signing_keyid=$(<<<"$result" grep "^gpg: Signature made" | \
-                        grep -o -E "key ID [0-9A-Fa-f]{8,16}" | \
+                    signing_keyid=$(<<<"$result" grep -o -E "RSA key [0-9A-Fa-f]{1,16}" | \
                         cut -d ' ' -f 3 )
 
                     if is_allowed_signer $signing_keyid; then
                         echo "*** Good signature on tag $short_ref by signing key $signing_keyid" >&2
                     else
-                        echo "*** Rejecting tag $short_ref due to lack of a valid GPG signature" >&2w
-                        exit 1
+                        abort_ops "*** Rejecting tag $short_ref due to lack of a valid GPG signature" 
                     fi
                 fi
             fi
             ;;
         *)
-            echo "*** No new commits, but the pushed ref $ref is a \"$type\" instead of a tag? I'm confused." >&2
-            exit 1
+            abort_ops "*** No new commits, but the pushed ref $ref is a \"$type\" instead of a tag? I'm confused."
             ;;
     esac
 fi
@@ -245,6 +248,14 @@ for commit in $span ; do
         fi
     fi
 
+    ## the following returns non-null if $rev_cur is originating from branches
+    ## beginning with the name "devel":
+    is_from_develop=$(git branch --contains "$commit" | grep devel )
+
+    ## the following returns non-null if $rev_cur is originating from branches
+    ## beginning with the name "release":
+    is_from_release=$(git branch --contains "$commit" | grep release )
+
     ## the following returns non-null if $rev_cur is a signed tag:
     is_signed_tag=$(git tag --verify "$ref" 2>&1 >/dev/null | grep '^gpg: Good signature')
 
@@ -255,28 +266,20 @@ for commit in $span ; do
     ## the following extracts the signing keyid (either short or long) from the
     ## signature on $rev_cur:
     signing_keyid=$(git show --no-patch --format=%H --show-signature "$commit" | \
-        grep -o -E "key ID [0-9A-Fa-f]{8,16}" | \
+        grep -o -E "RSA key [0-9A-Fa-f]{1,16}" | \
         cut -d ' ' -f 3 )
 
+    if [ -z "$signing_keyid" ]; then
+        abort_ops "Commit $commit is not signed."
+    fi
     fpr_signing_keyid=$(gpg --fingerprint "$signing_keyid" | \
         grep -o -E "([0-9A-F]{4}[[:space:]]{0,2}){10}")
 
+    if [ -z "$fpr_signing_keyid" ]; then
+       echo "Unable to get fingerprint for keyid $signing_keyid"
+       exit 1
+    fi
     case "$ref","$commit_type" in
-        refs/heads/*,merge)
-            if [ "$allowunsignedcommits" != "true" ]; then
-                if [ -n "$has_good_sig" -a -n "$signing_keyid" ]; then
-                    if is_allowed_signer $signing_keyid; then
-                        echo "*** Good signature on merge $commit by signing key $signing_keyid" >&2
-                    else
-                        echo "*** Key $signing_keyid is not allowed to sign merge $commit" >&2
-                        exit 1
-                    fi
-                else
-                    echo "*** Merges must be signed with an authorised key" >&2
-                    exit 1
-                fi
-            fi
-            ;;
         refs/heads/*,commit)
             ## commit on any branch
             if [ "$rev_old" = "$zero" -a "$denycreatebranch" = "true" ]; then
@@ -298,12 +301,54 @@ for commit in $span ; do
                 fi
             fi
             ;;
-        refs/heads/*,delete)
+        refs/heads/master,merge)
+            ## only allow merges to master from release-* and develop/*
+            if test -z "$is_from_develop" -a -z "$is_from_release"; then
+                echo "*** Branch master only takes merge commits originating from develop/* or release-* branches" >&2
+                exit 1
+            else
+                if [ "$allowunsignedcommits" != "true" ]; then
+                    if [ -n "$has_good_sig" -a -n "$signing_keyid" ]; then
+                        if is_allowed_signer $signing_keyid; then
+                            echo "*** Good signature on merge $commit by signing key $signing_keyid" >&2
+                        else
+                            echo "*** Key $signing_keyid is not allowed to sign merge $commit" >&2
+                            exit 1
+                        fi
+                    else
+                        echo "*** Merges must be signed with an authorised key" >&2
+                        exit 1
+                    fi
+                fi
+            fi
+            ;;
+        refs/heads/*,merge)
+            ## merge into non-master branch
+            if [ "$allowunsignedcommits" != "true" ]; then
+                if [ -n "$has_good_sig" -a -n "$signing_keyid" ]; then
+                    if is_allowed_signer $signing_keyid; then
+                        echo "*** Good signature on merge $commit by signing key $signing_keyid" >&2
+                    else
+                        echo "*** Key $signing_keyid is not allowed to sign merge $commit" >&2
+                        exit 1
+                    fi
+                else
+                    echo "*** Merges must be signed with an authorised key" >&2
+                    exit 1
+                fi
+            fi
+            ;;
+        refs/heads/master,delete)
             # delete branch
             if [ "$allowdeletebranch" != "true" ]; then
-                echo "*** Deleting a branch is not allowed in this repository" >&2
+                echo "*** Deleting master is not allowed in this repository" >&2
                 exit 1
             fi
+            ;;
+        refs/heads/master,*)
+            ## kill it with fire
+            echo "*** Branch master only takes merge commits originating from develop/* or release-* branches" >&2
+            exit 1
             ;;
         refs/tags/*,delete)
             ## delete tag
@@ -331,3 +376,4 @@ for commit in $span ; do
     ## increment the current rev to the $commit we just checked:
     rev_cur=$commit
 done
+
